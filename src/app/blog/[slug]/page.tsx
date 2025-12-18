@@ -1,19 +1,15 @@
-import Link from "next/link";
+import Link from 'next/link'
 
-export default async function BlogPost({
-  params,
-}: {
-  params: Promise<{ slug: string }>
-}) {
+export default async function BlogPost({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params
 
   // 模拟文章数据
   const posts: Record<string, { title: string; content: string }> = {
-    'hello': {
+    hello: {
       title: 'Hello World',
       content: '这是我的第一篇博客文章。',
     },
-    'next': {
+    next: {
       title: 'Next.js 入门',
       content: '学习 Next.js 的基础知识。',
     },
