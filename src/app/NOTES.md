@@ -20,7 +20,8 @@ src/app/
     ├── search/
     │   └── page.tsx      → /blog/search?q=xxx
     └── [slug]/
-        └── page.tsx      → /blog/:slug（动态路由）
+        ├── page.tsx      → /blog/:slug（动态路由）
+        └── loading.tsx   → 骨架屏（Streaming）
 ```
 
 ---
@@ -157,3 +158,89 @@ npm run lint -- --fix  # ESLint 自动修复
 | 查询参数 | `searchParams` | `@RequestParam` |
 | 布局/模板 | `layout.tsx` | Thymeleaf layout |
 | 数据获取 | async/await | Service 层 |
+
+---
+
+## Linking and Navigating
+
+### 1. 导航工作原理
+Next.js 默认服务端渲染，通过以下技术实现流畅导航：
+
+| 技术 | 作用 |
+|------|------|
+| Prefetching | 提前加载用户可能访问的页面 |
+| Streaming | 分块传输，先显示骨架屏再显示内容 |
+| Client-side transitions | 局部更新，不整页刷新 |
+
+### 2. Link vs a 标签
+```tsx
+<Link href="/blog">博客</Link>   // 客户端导航，不刷新，自动预取
+<a href="/blog">博客</a>         // 整页刷新，无预取
+```
+
+观察方法：Link 点击浏览器标签页不转圈，a 标签会转圈
+
+### 3. 两种渲染模式
+
+| 类型 | 时机 | 预取策略 |
+|------|------|---------|
+| Static Rendering | 构建时 | 预取完整页面 |
+| Dynamic Rendering | 请求时 | 只预取 loading.tsx |
+
+### 4. Streaming 流式传输
+用 `loading.tsx` 实现骨架屏，用户不用傻等：
+
+```tsx
+// src/app/blog/[slug]/loading.tsx
+export default function Loading() {
+  return <div>加载中...</div>
+}
+```
+
+Next.js 自动包装 `<Suspense>`，点击立刻显示骨架屏
+
+### 5. generateStaticParams 静态生成
+类似 Redis 缓存热门数据，构建时预生成页面：
+
+```tsx
+// hello 预生成秒开，其他动态渲染要等
+export async function generateStaticParams() {
+  return [{ slug: 'hello' }]
+}
+```
+
+配合 `revalidate` 实现定时更新（类似缓存过期）：
+```tsx
+export const revalidate = 60  // 60秒后重新生成
+```
+
+### 6. 慢网络处理
+三层保障：
+1. **Prefetch** - 提前加载（网速快时生效）
+2. **loading.tsx** - 骨架屏（网速中等）
+3. **useLinkStatus** - 链接转圈（网速慢，骨架屏都没加载出来）
+
+### 7. Hydration 优化
+服务端先给界面，客户端 JS 接管交互：
+- Server Component：纯展示，不占 JS 体积
+- Client Component：需要交互的最小部分，越小 Hydration 越快
+
+---
+
+## 代码改动说明
+
+### 1. Link vs a 标签对比
+文件：`src/app/blog/[slug]/page.tsx`
+
+演示两种导航方式的区别，Link 不刷新页面，a 标签整页刷新
+
+### 2. loading.tsx 骨架屏
+文件：`src/app/blog/[slug]/loading.tsx`
+
+动态路由加载时显示骨架屏，立刻响应用户
+
+### 3. generateStaticParams 对比
+文件：`src/app/blog/[slug]/page.tsx`
+
+- `/blog/hello` → 预生成，秒开
+- `/blog/next` → 动态渲染，等 2 秒 + 显示骨架屏
