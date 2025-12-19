@@ -12,16 +12,20 @@ src/app/
 ├── layout.tsx            → 根布局
 ├── home/
 │   └── page.tsx          → /home
-└── blog/
-    ├── layout.tsx        → /blog 布局（红色字体）
-    ├── page.tsx          → /blog
-    ├── best/
-    │   └── page.tsx      → /blog/best
-    ├── search/
-    │   └── page.tsx      → /blog/search?q=xxx
-    └── [slug]/
-        ├── page.tsx      → /blog/:slug（动态路由）
-        └── loading.tsx   → 骨架屏（Streaming）
+├── blog/
+│   ├── layout.tsx        → /blog 布局（红色字体）
+│   ├── page.tsx          → /blog
+│   ├── best/
+│   │   └── page.tsx      → /blog/best
+│   ├── search/
+│   │   └── page.tsx      → /blog/search?q=xxx
+│   └── [slug]/
+│       ├── page.tsx      → /blog/:slug（动态路由）
+│       └── loading.tsx   → 骨架屏（Streaming）
+└── theme-demo/
+    ├── page.tsx          → /theme-demo（Context 演示）
+    ├── theme-provider.tsx→ ThemeProvider（Client）
+    └── theme-button.tsx  → ThemeButton（Client）
 ```
 
 ---
@@ -244,3 +248,114 @@ export const revalidate = 60  // 60秒后重新生成
 
 - `/blog/hello` → 预生成，秒开
 - `/blog/next` → 动态渲染，等 2 秒 + 显示骨架屏
+
+---
+
+## Server and Client Components
+
+### 1. 使用场景
+
+| Client Component | Server Component |
+|------------------|------------------|
+| `useState`、`useEffect` | 数据库/API 查询 |
+| `onClick`、`onChange` 事件 | 使用密钥、Token（不暴露给前端） |
+| `localStorage`、`window` | 减少 JS 体积 |
+| 自定义 hooks | 提升首屏速度 |
+
+### 2. 工作原理
+
+**首次加载：**
+```
+HTML（秒看）→ RSC Payload → JS + Hydration → 可交互
+```
+
+**后续导航：**
+```
+RSC Payload（预取/缓存）→ 客户端局部更新 → 可交互
+```
+
+### 3. 减少 JS 体积
+只给需要交互的最小部分加 `'use client'`：
+
+```tsx
+// Layout 是 Server（默认）
+export default function Layout() {
+  return (
+    <nav>
+      <Logo />     {/* Server - 纯展示，不打包 JS */}
+      <Search />   {/* Client - 有交互，打包 JS */}
+    </nav>
+  )
+}
+```
+
+### 4. 数据传递
+Server Component 通过 props 传数据给 Client Component：
+
+```tsx
+// Server Component
+const post = await getPost(id)
+return <LikeButton likes={post.likes} />
+
+// Client Component - 直接用，不需要 fetch
+function LikeButton({ likes }) { ... }
+```
+
+注意：props 必须可序列化（基本类型、数组、对象），不能传函数
+
+### 5. 交错使用（Interleaving）
+用 `children` 模式在 Client 中嵌套 Server：
+
+```tsx
+<Modal>        {/* Client */}
+  <Cart />     {/* Server，作为 children 传入，仍是服务端渲染 */}
+</Modal>
+```
+
+Server Component 的渲染永远在服务端，不管放在哪里
+
+### 6. Context Provider
+Context 需要客户端状态，Provider 必须是 Client Component：
+
+```tsx
+// theme-provider.tsx
+'use client'
+export default function ThemeProvider({ children }) {
+  const [theme, setTheme] = useState('light')
+  return (
+    <ThemeContext.Provider value={{ theme }}>
+      {children}  {/* children 可以是 Server Component */}
+    </ThemeContext.Provider>
+  )
+}
+```
+
+### 7. 第三方组件
+第三方库没有 `'use client'` 时，包一层：
+
+```tsx
+// carousel.tsx
+'use client'
+import { Carousel } from 'acme-carousel'
+export default Carousel
+```
+
+### 8. 环境隔离
+
+| 标记 | 作用 |
+|------|------|
+| `import 'server-only'` | 防止服务端代码被客户端导入 |
+| `import 'client-only'` | 防止客户端代码被服务端导入 |
+| 非 `NEXT_PUBLIC_` 环境变量 | 自动只在服务端可用 |
+
+---
+
+## 代码改动说明
+
+### 4. Context Provider 演示
+文件：`src/app/theme-demo/`
+
+演示如何在 Next.js 中使用 React Context：
+- `theme-provider.tsx` - Client Component，提供 ThemeContext
+- `theme-button.tsx` - Client Component，使用 useContext 切换主题
+- `page.tsx` - Server Component，组合 Provider 和 children
