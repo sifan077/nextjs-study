@@ -359,3 +359,317 @@ export default Carousel
 - `theme-provider.tsx` - Client Component，提供 ThemeContext
 - `theme-button.tsx` - Client Component，使用 useContext 切换主题
 - `page.tsx` - Server Component，组合 Provider 和 children
+
+---
+
+## Cache Components（缓存组件）
+
+> 需要在 `next.config.js` 中设置 `cacheComponents: true` 启用
+
+### 1. 核心概念
+
+传统 SSR 的两难困境：
+
+| 方案 | 优点 | 缺点 |
+|-----|------|------|
+| 静态页面 (SSG) | 超快，CDN 直接返回 | 数据可能过时 |
+| 动态页面 (SSR) | 数据实时新鲜 | 每次请求都要计算，慢 |
+| 客户端渲染 (CSR) | 服务器压力小 | JS bundle 大，首屏慢 |
+
+**Cache Components 解决方案**：在同一个页面混合静态、缓存、动态内容
+
+```
+┌─────────────────────────────────────┐
+│         静态 HTML Shell             │  ← 立即发送（极快）
+│  ┌─────────────┬─────────────────┐  │
+│  │   静态内容   │   缓存内容       │  │  ← 预渲染好的
+│  ├─────────────┴─────────────────┤  │
+│  │        动态内容                 │  │  ← 请求时流式填充
+│  └───────────────────────────────┘  │
+└─────────────────────────────────────┘
+```
+
+### 2. 内容分类
+
+构建时自动判断组件的"性质"：
+
+| 操作类型 | 示例 | 能否预渲染 |
+|---------|------|-----------|
+| 同步文件读取 | `fs.readFileSync()` | ✅ 自动 |
+| 模块导入 | `import('./constants.json')` | ✅ 自动 |
+| 纯计算 | `array.map()`, `JSON.parse()` | ✅ 自动 |
+| 网络请求 | `fetch('https://api...')` | ❌ 需显式处理 |
+| 读取 cookies/headers | `cookies()`, `headers()` | ❌ 需显式处理 |
+
+### 3. 两种处理方式
+
+无法预渲染的组件必须显式处理，否则报错：`Uncached data was accessed outside of <Suspense>`
+
+| 方式 | 指令/组件 | 效果 | 适用场景 |
+|-----|----------|------|---------|
+| 延迟渲染 | `<Suspense>` | 先显示 fallback，数据 ready 后替换 | 需要实时数据（用户信息） |
+| 缓存结果 | `use cache` | 缓存输出，加入静态 Shell | 不依赖请求数据（商品列表） |
+
+### 4. Suspense 延迟渲染
+
+```tsx
+export default async function Page() {
+  return (
+    <>
+      <h1>Part of the static shell</h1>     {/* ✅ 进入静态 Shell */}
+
+      <Suspense fallback={<p>Loading..</p>}> {/* fallback 进入静态 Shell */}
+        <DynamicContent />                   {/* ❌ 请求时才渲染 */}
+      </Suspense>
+    </>
+  )
+}
+```
+
+**关键原则**：Suspense 边界要尽量小，只包裹真正需要的部分
+
+**并行优势**：多个 Suspense 边界之间互不阻塞，可以并行加载
+
+### 5. 动态内容（需要 Suspense）
+
+```tsx
+async function DynamicContent() {
+  // ❌ 这些都不会自动预渲染
+  const data = await fetch('https://api.example.com/data')  // 网络请求
+  const users = await db.query('SELECT * FROM users')       // 数据库查询
+  const file = await fs.readFile('..', 'utf-8')            // 异步文件读取
+
+  return <div>...</div>
+}
+```
+
+**注意**：预渲染在遇到 `fetch` 时就停了，后面的代码构建时不执行
+
+### 6. 运行时数据（只能用 Suspense）
+
+这类数据必须等用户请求到来才能知道：
+
+| API | 数据来源 | Java 类比 |
+|-----|---------|----------|
+| `cookies()` | 用户浏览器 Cookie | `request.getCookies()` |
+| `headers()` | 请求头 | `request.getHeader()` |
+| `searchParams` | URL 查询参数 | `request.getParameter()` |
+| `params` | 动态路由参数 | `@PathVariable` |
+
+**重要**：运行时数据不能用 `use cache`（每个用户数据不同，缓存会造成数据泄露）
+
+### 7. 非确定性操作
+
+`Math.random()`、`Date.now()`、`crypto.randomUUID()` 等每次执行结果都不同
+
+| 方式 | 效果 | 适用场景 |
+|-----|------|---------|
+| `await connection()` + Suspense | 每个请求生成新值 | 订单号、验证码 |
+| `use cache` | 缓存固定值，所有请求相同 | 每日随机推荐 |
+
+```tsx
+async function UniqueContent() {
+  await connection()  // ← 告诉 Next.js：等请求来了再执行
+  const uuid = crypto.randomUUID()  // 每个请求不同
+  return <div>{uuid}</div>
+}
+```
+
+### 8. use cache 指令
+
+缓存异步函数/组件的返回值：
+
+```tsx
+import { cacheLife } from 'next/cache'
+
+export default async function Page() {
+  'use cache'           // ← 启用缓存
+  cacheLife('hours')    // ← 设置缓存时长
+
+  const users = await db.query('SELECT * FROM users')
+  return <ul>...</ul>
+}
+```
+
+**应用级别**：函数级、组件级、文件级
+
+**自动缓存键**：参数 + 闭包变量 = 缓存键（类似 Spring 的 `@Cacheable(key = "#category")`）
+
+### 9. cacheLife 自定义配置
+
+```tsx
+cacheLife({
+  stale: 3600,      // 1小时后标记为"陈旧"
+  revalidate: 7200, // 2小时后重新验证
+  expire: 86400,    // 1天后过期删除
+})
+```
+
+时间线：
+
+| 阶段 | 用户体验 | 后台行为 |
+|-----|---------|---------|
+| < stale | 秒返回 | 啥都不干 |
+| stale ~ revalidate | 秒返回（旧数据） | 偷偷刷新 |
+| revalidate ~ expire | 要等一下 | 刷新完才给你 |
+| > expire | 要等一下 | 缓存没了，重新来 |
+
+### 10. revalidateTag 手动刷新
+
+```tsx
+import { cacheTag, revalidateTag } from 'next/cache'
+
+// 1. 给缓存打标签
+export async function getPosts() {
+  'use cache'
+  cacheTag('posts')  // ← 打上 'posts' 标签
+}
+
+// 2. 需要时使标签失效
+export async function createPost(post: FormData) {
+  'use server'
+  // 写入新数据
+  revalidateTag('posts')  // ← 让所有 'posts' 标签的缓存失效
+}
+```
+
+类似 Spring 的 `@CacheEvict(cacheNames = "posts")`
+
+### 11. 如何决定缓存什么？
+
+核心思路：从用户体验的 loading 状态反推
+
+| 场景 | 选择 |
+|-----|------|
+| 数据不依赖用户，可多个请求共享 | `use cache` + `cacheLife` |
+| CMS 内容，有更新机制 | 长缓存 + `revalidateTag` 手动刷新 |
+| 必须实时、依赖用户 | `<Suspense>` |
+
+### 12. 综合示例
+
+```tsx
+export default function BlogPage() {
+  return (
+    <>
+      {/* 1️⃣ 静态内容 - 自动预渲染 */}
+      <header>
+        <h1>Our Blog</h1>
+        <nav>...</nav>
+      </header>
+
+      {/* 2️⃣ 缓存动态内容 - 进入静态 Shell */}
+      <BlogPosts />
+
+      {/* 3️⃣ 运行时动态内容 - 请求时流式加载 */}
+      <Suspense fallback={<p>Loading...</p>}>
+        <UserPreferences />
+      </Suspense>
+    </>
+  )
+}
+
+// 所有用户看到相同内容（每小时刷新）
+async function BlogPosts() {
+  'use cache'
+  cacheLife('hours')
+  const posts = await fetch('https://api.example.com/posts').then(r => r.json())
+  return <ul>...</ul>
+}
+
+// 每个用户不同（读 cookies）
+async function UserPreferences() {
+  const theme = (await cookies()).get('theme')?.value || 'light'
+  return <aside>Your theme: {theme}</aside>
+}
+```
+
+渲染时间线：
+
+| 组件 | 类型 | 用户体验 |
+|-----|------|---------|
+| `<header>` | 静态 | 立即可见 |
+| `<BlogPosts />` | 缓存动态 | 立即可见（缓存数据） |
+| `<UserPreferences />` | 运行时动态 | 先 fallback，再替换 |
+
+### 13. Activity 导航（状态保持）
+
+启用 `cacheComponents` 后，导航时组件状态会保留：
+
+| 行为 | 传统导航 | Activity 导航 |
+|-----|---------|--------------|
+| 离开页面时 | 组件卸载 | 组件隐藏 |
+| 返回页面时 | 重新挂载（状态重置） | 重新显示（状态保留） |
+
+保留的状态：
+- 表单输入内容
+- 展开/折叠状态
+- 滚动位置
+- useState 本地状态
+
+类似 LRU 缓存：保留最近访问的几个路由，太旧的会从 DOM 移除
+
+---
+
+## 对比 Java 缓存
+
+| 概念 | Next.js | Java/Spring |
+|------|---------|-------------|
+| 启用缓存 | `'use cache'` | `@Cacheable` |
+| 缓存键 | 参数自动成为键 | `key = "#param"` |
+| 缓存时长 | `cacheLife()` | `ttl` 配置 |
+| 手动失效 | `revalidateTag()` | `@CacheEvict` |
+| 缓存标签 | `cacheTag()` | `cacheNames` |
+
+---
+
+## 代码改动说明
+
+### 5. Cache Components 示例
+文件夹：`src/app/cache/`
+
+```
+src/app/cache/
+├── layout.tsx        → 统一布局（导航栏）
+├── page.tsx          → /cache 首页（概念介绍）
+├── static/
+│   └── page.tsx      → /cache/static 静态内容示例
+├── dynamic/
+│   └── page.tsx      → /cache/dynamic 动态内容示例
+├── use-cache/
+│   └── page.tsx      → /cache/use-cache 缓存示例
+├── runtime/
+│   └── page.tsx      → /cache/runtime 运行时数据示例
+└── combined/
+    └── page.tsx      → /cache/combined 综合示例
+```
+
+#### layout.tsx
+- 为所有 `/cache/*` 页面提供统一导航
+- 静态内容，自动预渲染
+
+#### static/page.tsx
+- 演示自动预渲染的内容：静态数据、纯计算、模块导入
+- 构建时间戳展示（刷新不变）
+
+#### dynamic/page.tsx
+- 演示 Suspense 处理动态内容
+- 两个慢速组件（2秒、3秒）并行加载
+- Loading 骨架屏展示
+
+#### use-cache/page.tsx
+- `use cache` 指令用法说明
+- `cacheLife` 配置详解（预设 + 自定义）
+- `cacheTag` 和 `revalidateTag` 手动刷新
+
+#### runtime/page.tsx
+- `cookies()` 读取用户 Cookie
+- `headers()` 读取请求头
+- `searchParams` URL 查询参数
+- 访问 `/cache/runtime?name=张三&age=25` 测试
+
+#### combined/page.tsx
+- 三种内容混合的完整示例
+- StaticHeader（静态）- 立即显示
+- CachedProductList（缓存）- 商品列表
+- DynamicUserInfo（动态）- 用户信息，Suspense 包裹
+- 可设置 Cookie 测试动态效果
