@@ -970,3 +970,371 @@ const time = new Date()  // ❌ 仍然会报错
 await connection()  // ✅ 告诉 Next.js 这是动态内容
 const time = new Date()
 ```
+
+---
+
+## Updating Data（数据更新）
+
+### 1. 核心概念
+
+| 概念 | 说明 |
+|------|------|
+| **Server Function** | 在服务器上执行的异步函数，客户端通过网络请求调用 |
+| **Server Action** | 用于数据变更场景的 Server Function（本质相同，叫法不同） |
+
+```
+传统方式：前端 → fetch('/api/xxx') → API Route → 数据库
+Server Action：前端 → serverAction() → 数据库（省去 API 层）
+```
+
+### 2. 创建 Server Function
+
+两种方式使用 `'use server'` 指令：
+
+```ts
+// 方式1：文件顶部声明（推荐）
+// app/actions.ts
+'use server'
+
+export async function createPost(formData: FormData) {
+  const title = formData.get('title')
+  // 写入数据库...
+}
+
+export async function deletePost(formData: FormData) {
+  // ...
+}
+
+// 方式2：函数内部声明
+export async function createPost(formData: FormData) {
+  'use server'
+  // ...
+}
+```
+
+**注意**：必须是 `async` 函数
+
+### 3. 在不同组件中使用
+
+| 组件类型 | 能否定义 | 能否使用 | 说明 |
+|----------|----------|----------|------|
+| Server Component | ✅ 可内联定义 | ✅ | 支持渐进增强（无 JS 也能提交） |
+| Client Component | ❌ 不能定义 | ✅ 导入/props | 需要 JS 加载后才能提交 |
+
+**Server Component 内联定义：**
+```tsx
+export default function Page() {
+  async function createPost(formData: FormData) {
+    'use server'
+    // ...
+  }
+  return <form action={createPost}>...</form>
+}
+```
+
+**Client Component 导入使用：**
+```tsx
+'use client'
+import { createPost } from '@/app/actions'
+
+export function Button() {
+  return <button formAction={createPost}>Create</button>
+}
+```
+
+**通过 props 传递：**
+```tsx
+// Server Component
+<ClientForm action={createPost} />
+
+// Client Component
+function ClientForm({ action }: { action: (formData: FormData) => void }) {
+  return <form action={action}>...</form>
+}
+```
+
+### 4. 调用方式
+
+| 方式 | 组件类型 | 特点 |
+|------|----------|------|
+| Form action | Server & Client | 自动获取 FormData，支持渐进增强 |
+| Event Handler | Client only | 可获取返回值，需要 JS |
+
+**Form 方式：**
+```tsx
+<form action={createPost}>
+  <input name="title" />
+  <button type="submit">Submit</button>
+</form>
+
+// Server Action 自动接收 FormData
+async function createPost(formData: FormData) {
+  'use server'
+  const title = formData.get('title')
+}
+```
+
+**Event Handler 方式：**
+```tsx
+'use client'
+
+export function LikeButton({ initialLikes }) {
+  const [likes, setLikes] = useState(initialLikes)
+
+  return (
+    <button onClick={async () => {
+      const updatedLikes = await incrementLike()  // 获取返回值
+      setLikes(updatedLikes)
+    }}>
+      Like ({likes})
+    </button>
+  )
+}
+```
+
+### 5. useActionState（显示加载状态）
+
+React 19 新增的 Hook，专门处理 Server Action 状态：
+
+```tsx
+'use client'
+import { useActionState, startTransition } from 'react'
+import { createPost } from '@/app/actions'
+
+export function Button() {
+  const [state, action, pending] = useActionState(createPost, null)
+  //     ↑       ↑        ↑
+  //   返回值  包装后的   是否执行中
+  //          action
+
+  return (
+    <button onClick={() => startTransition(action)}>
+      {pending ? 'Loading...' : 'Create Post'}
+    </button>
+  )
+}
+```
+
+| 返回值 | 类型 | 说明 |
+|--------|------|------|
+| `state` | any | Server Action 的返回值 |
+| `action` | function | 包装后的 action（带状态追踪） |
+| `pending` | boolean | 是否正在执行 |
+
+**对比 useSWR：**
+
+| 特性 | useActionState | useSWR |
+|------|----------------|--------|
+| 用途 | 数据变更（增删改） | 数据获取（查询） |
+| 触发 | 手动调用 | 自动 + 可手动 |
+| 缓存 | ❌ | ✅ 自动缓存 |
+
+### 6. 缓存重验证
+
+更新数据后需要清除缓存，让页面显示最新数据：
+
+```ts
+import { revalidatePath, revalidateTag } from 'next/cache'
+
+export async function createPost(formData: FormData) {
+  'use server'
+  // 1. 写入数据库
+  await db.post.create({ data: {...} })
+
+  // 2. 清除缓存（二选一）
+  revalidatePath('/posts')       // 按路径
+  revalidateTag('posts')         // 按标签
+}
+```
+
+| 方法 | 用途 | 示例 |
+|------|------|------|
+| `revalidatePath(path)` | 按路径清除 | `revalidatePath('/posts')` |
+| `revalidateTag(tag)` | 按标签清除 | `revalidateTag('posts')` |
+
+**revalidateTag 需要先打标签：**
+```ts
+// 获取数据时打标签
+fetch('https://api.example.com/posts', {
+  next: { tags: ['posts'] }
+})
+
+// 更新后按标签清除
+revalidateTag('posts')
+```
+
+### 7. 重定向
+
+```ts
+import { redirect } from 'next/navigation'
+import { revalidatePath } from 'next/cache'
+
+export async function createPost(formData: FormData) {
+  'use server'
+  await db.post.create({ data: {...} })
+
+  revalidatePath('/posts')  // ⚠️ 必须在 redirect 之前！
+  redirect('/posts')        // 抛异常实现跳转，后面代码不执行
+}
+```
+
+**重要**：`redirect` 内部通过抛异常实现，后面的代码不会执行
+
+### 8. Cookies 操作
+
+```ts
+import { cookies } from 'next/headers'
+
+export async function exampleAction() {
+  'use server'
+  const cookieStore = await cookies()
+
+  // 读取
+  const value = cookieStore.get('name')?.value
+
+  // 设置
+  cookieStore.set('name', 'value', {
+    httpOnly: true,
+    secure: true,
+    maxAge: 60 * 60 * 24  // 24小时
+  })
+
+  // 删除
+  cookieStore.delete('name')
+}
+```
+
+设置/删除 cookie 后页面会**自动重新渲染**
+
+### 9. 渐进增强（Progressive Enhancement）
+
+| 场景 | Server Component | Client Component |
+|------|------------------|------------------|
+| JS 未加载 | 传统表单提交（页面刷新） | 排队等待，JS 加载后再提交 |
+| JS 已加载 | AJAX 无刷新 | AJAX 无刷新 |
+
+**优点**：网络慢/JS 禁用时也能用，对 SEO 友好
+
+### 10. 对比 Java
+
+| Next.js | Java Spring |
+|---------|-------------|
+| `'use server'` | `@PostMapping` |
+| `formData.get('title')` | `@RequestParam` / `request.getParameter()` |
+| `revalidatePath()` | 手动清除 Redis 缓存 |
+| `redirect('/path')` | `return "redirect:/path"` |
+| `cookies()` | `HttpServletRequest/Response` |
+
+### 11. 关键点总结
+
+1. Server Action **只能用 POST 方法**调用
+2. **必须是 async 函数**
+3. Client Component **不能定义**，只能导入使用
+4. 多个 Server Action 在客户端是**串行执行**的
+5. `redirect` 会抛异常，`revalidatePath` **必须在它之前**调用
+6. Server Component 中的表单支持**渐进增强**（无 JS 也能用）
+
+---
+
+## 代码改动说明
+
+### 7. Updating Data 示例
+文件夹：`src/app/update/`
+
+```
+src/app/update/
+├── layout.tsx        → 统一布局（导航栏）
+├── actions.ts        → 所有 Server Actions 定义
+├── page.tsx          → /update 首页（概念介绍）
+├── form/
+│   └── page.tsx      → Form 表单提交示例
+├── event/
+│   └── page.tsx      → Event Handler 示例
+├── pending/
+│   └── page.tsx      → useActionState 示例
+└── revalidate/
+    └── page.tsx      → revalidate/redirect/cookies 示例
+```
+
+#### actions.ts
+- **文件顶部 `'use server'`**：所有导出函数都是 Server Action
+- **模拟内存数据库**：posts 数组、likes 计数
+- **createPost / deletePost**：Form action 示例
+- **incrementLike / decrementLike**：Event Handler 示例，有返回值
+- **slowSubmit**：慢速提交，演示 pending 状态
+- **updateDataWithRevalidatePath**：revalidatePath 示例
+- **updateAndRedirect**：redirect 示例（注意顺序）
+- **setThemeCookie / getThemeCookie / deleteThemeCookie**：Cookies 操作
+
+#### form/page.tsx
+- **Server Component**：直接 await getPosts() 获取数据
+- **form action**：绑定 createPost，自动获取 FormData
+- **隐藏字段**：删除按钮用 `<input type="hidden" name="id">` 传 ID
+- **revalidatePath**：提交后自动刷新列表
+
+#### event/page.tsx
+- **Client Component**：使用 useState 管理状态
+- **onClick 调用**：`await incrementLike()` 获取返回值
+- **手动 loading**：useState 管理 pending 状态
+- **对比表格**：Form action vs Event Handler
+
+#### pending/page.tsx
+- **useActionState**：React 19 新 Hook
+- **三个返回值**：`[state, formAction, pending]`
+- **自动 pending**：无需手动 setState
+- **对比代码**：手动方式 vs useActionState
+
+#### revalidate/page.tsx
+- **Suspense 包裹**：cookies() 是运行时数据，必须用 Suspense
+- **DataDisplay / ThemeDisplay**：拆分成独立异步组件
+- **revalidatePath**：点击按钮更新数据并刷新页面
+- **redirect**：演示正确顺序（revalidate 在前）
+- **Cookies 操作**：设置 Light/Dark 主题
+
+---
+
+## 踩坑记录
+
+### 4. cookies() 必须在 Suspense 内
+
+```tsx
+// ❌ 错误：直接在页面组件读取 cookies
+export default async function Page() {
+  const theme = await getThemeCookie()  // 会报错
+}
+
+// ✅ 正确：拆分成独立组件，用 Suspense 包裹
+async function ThemeDisplay() {
+  const theme = await getThemeCookie()
+  return <span>{theme}</span>
+}
+
+export default function Page() {
+  return (
+    <Suspense fallback={<p>Loading...</p>}>
+      <ThemeDisplay />
+    </Suspense>
+  )
+}
+```
+
+**原因**：cookies() 是运行时数据，每个请求不同，无法预渲染
+
+### 5. Form action 返回值类型必须是 void
+
+```tsx
+// ❌ 错误：返回对象会导致类型错误
+export async function createPost(formData: FormData) {
+  'use server'
+  return { success: true }  // Type error!
+}
+
+// ✅ 正确：返回 void 或 Promise<void>
+export async function createPost(formData: FormData): Promise<void> {
+  'use server'
+  // 处理逻辑...
+  revalidatePath('/posts')
+}
+```
+
+**原因**：form action 的类型签名是 `(formData: FormData) => void | Promise<void>`
