@@ -177,7 +177,7 @@ Next.js 默认服务端渲染，通过以下技术实现流畅导航：
 | Client-side transitions | 局部更新，不整页刷新 |
 
 ### 2. Link vs a 标签
-```tsx
+```html
 <Link href="/blog">博客</Link>   // 客户端导航，不刷新，自动预取
 <a href="/blog">博客</a>         // 整页刷新，无预取
 ```
@@ -673,3 +673,300 @@ src/app/cache/
 - CachedProductList（缓存）- 商品列表
 - DynamicUserInfo（动态）- 用户信息，Suspense 包裹
 - 可设置 Cookie 测试动态效果
+
+---
+
+## Fetching Data（数据获取）
+
+### 1. Server Components 获取数据
+
+三种方式：
+
+| 方式 | 示例 | Java 类比 |
+|-----|------|----------|
+| `fetch` API | 调用外部 REST API | `RestTemplate` / `WebClient` |
+| ORM/数据库 | Prisma、Drizzle 查询 | JPA / MyBatis |
+| 文件系统 | `fs.readFile()` | `Files.readString()` |
+
+```tsx
+// Server Component（默认）- 直接 async/await
+export default async function Page() {
+  const data = await fetch('https://api.example.com/posts')
+  const posts = await data.json()
+  return <ul>{posts.map(p => <li key={p.id}>{p.title}</li>)}</ul>
+}
+
+// ORM 直接查询（代码不会发到浏览器，安全）
+const allPosts = await db.select().from(posts)
+```
+
+### 2. Client Components 获取数据
+
+两种方式：
+
+| 方式 | 特点 | 适用场景 |
+|-----|------|---------|
+| `use` hook | React 19 原生，配合 Suspense | 数据从 Server 传下来 |
+| SWR / React Query | 功能丰富（缓存、重试、轮询） | 生产环境推荐 |
+
+**use hook 模式：**
+```tsx
+// Server Component - 不 await，传 Promise
+export default function Page() {
+  const posts = getPosts()  // 返回 Promise
+  return (
+    <Suspense fallback={<Loading />}>
+      <Posts posts={posts} />
+    </Suspense>
+  )
+}
+
+// Client Component - 用 use 解包 Promise
+'use client'
+import { use } from 'react'
+function Posts({ posts }) {
+  const allPosts = use(posts)  // 解包 Promise
+  return <ul>...</ul>
+}
+```
+
+**SWR 模式：**
+```tsx
+'use client'
+import useSWR from 'swr'
+
+const { data, error, isLoading } = useSWR('/api/posts', fetcher)
+```
+
+### 3. 请求去重与缓存
+
+三个层级：
+
+| 层级 | 机制 | 范围 | 生效方式 |
+|-----|------|------|---------|
+| Request Memoization | 自动 | 单次渲染 | `fetch` 自动合并相同请求 |
+| React `cache` | 手动 | 单次渲染 | 包装 ORM 函数 |
+| Data Cache | 手动 | 跨请求 | `cache: 'force-cache'` |
+
+```tsx
+// fetch 自动去重（同一渲染中）
+// 组件 A 和 B 都调用，只发 1 次请求
+await fetch('/api/user')
+
+// ORM 用 cache 包装实现去重
+import { cache } from 'react'
+export const getPost = cache(async (id) => {
+  return await db.query.posts.findFirst({ where: eq(posts.id, id) })
+})
+```
+
+### 4. Streaming 流式传输
+
+**整页 Loading：** `loading.js`
+```
+app/blog/
+├── page.tsx      → 页面
+└── loading.tsx   → 加载状态（自动被 Suspense 包装）
+```
+
+**细粒度 Loading：** `<Suspense>`
+```tsx
+<Suspense fallback={<Skeleton />}>
+  <SlowComponent />
+</Suspense>
+```
+
+### 5. 串行 vs 并行获取
+
+**串行（有依赖）：**
+```tsx
+const artist = await getArtist(username)  // 先等这个
+return (
+  <>
+    <h1>{artist.name}</h1>
+    <Suspense fallback={<Loading />}>
+      <Playlists artistID={artist.id} />  {/* 再获取这个 */}
+    </Suspense>
+  </>
+)
+```
+
+**并行（无依赖）：**
+```tsx
+// 同时发起两个请求
+const [posts, users] = await Promise.all([
+  getPosts(),
+  getUsers()
+])
+```
+
+### 6. Preload 预加载
+
+场景：条件渲染，但数据获取不依赖条件
+
+```tsx
+export default async function Page({ params }) {
+  const { id } = await params
+
+  preload(id)  // 1️⃣ 立即启动（不等待）
+  const isAvailable = await checkIsAvailable()  // 2️⃣ 同时检查条件
+
+  return isAvailable ? <Item id={id} /> : null  // 3️⃣ 数据可能已 ready
+}
+
+const preload = (id) => {
+  void getItem(id)  // void = 执行但不等待
+}
+```
+
+### 7. 对比 Java
+
+| 概念 | Next.js | Java/Spring |
+|------|---------|-------------|
+| Server 获取数据 | async/await 直接用 | Controller + Service |
+| 请求去重 | 自动 / React cache | 一级缓存 / Redis |
+| 流式传输 | Suspense + Streaming | WebFlux / SSE |
+| 预加载 | void + cache | CompletableFuture |
+| 客户端获取 | SWR / React Query | 前端 axios |
+
+---
+
+## 代码改动说明
+
+### 6. Fetching Data 示例
+文件夹：`src/app/fetch/`
+
+```
+src/app/fetch/
+├── layout.tsx        → 统一布局（导航栏）
+├── page.tsx          → /fetch 首页（概念介绍）
+├── server/
+│   └── page.tsx      → Server Component 获取数据
+├── client/
+│   ├── page.tsx      → Server Component（传 Promise）
+│   └── posts-list.tsx→ Client Component（use hook 解包）
+├── streaming/
+│   ├── page.tsx      → Streaming 流式传输示例
+│   └── loading.tsx   → 整页 loading 骨架屏
+└── preload/
+    ├── page.tsx      → Preload 预加载示例
+    └── loading.tsx   → 骨架屏（searchParams 需要）
+```
+
+#### layout.tsx
+- 为所有 `/fetch/*` 页面提供统一导航
+- 静态内容，自动预渲染
+
+#### page.tsx（首页）
+- 概念介绍：Server vs Client 获取数据
+- 对比表格
+- Java 代码对比
+
+#### server/page.tsx
+- **React cache 去重**：`getUsers` 被多个组件调用，只执行一次
+- **缓存对比**：`force-cache` vs `no-store`
+- **connection()**：标记动态边界，允许使用 `new Date()`
+- **Suspense 包裹**：每个异步组件独立 loading
+
+```tsx
+// 关键代码
+import { connection } from 'next/server'
+
+async function CachedApiDemo() {
+  await connection()  // 标记动态边界
+  const res = await fetch(url, { cache: 'force-cache' })
+  const fetchTime = new Date().toISOString()  // 现在可以用了
+}
+```
+
+#### client/page.tsx + posts-list.tsx
+- **use hook 模式**：Server 传 Promise，Client 用 `use()` 解包
+- 演示数据流：`getPosts()` 不 await → Promise 作为 props → `use(posts)` 解包
+
+```tsx
+// page.tsx (Server)
+const posts = getPosts()  // 不 await
+return (
+  <Suspense fallback={<Skeleton />}>
+    <PostsList posts={posts} />
+  </Suspense>
+)
+
+// posts-list.tsx (Client)
+'use client'
+const allPosts = use(posts)  // 解包 Promise
+```
+
+#### streaming/page.tsx + loading.tsx
+- **loading.tsx**：导航时立即显示整页骨架屏
+- **串行获取**：`getArtist()` 必须先等，因为后续依赖 `artistID`
+- **并行 Suspense**：`Playlists` 和 `Recommendations` 用独立 Suspense，并行加载
+
+```tsx
+const artist = await getArtist(username)  // 阻塞
+return (
+  <>
+    <h1>{artist.name}</h1>  {/* 立即显示 */}
+    <Suspense><Playlists artistID={artist.id} /></Suspense>  {/* 并行 */}
+    <Suspense><Recommendations /></Suspense>  {/* 并行 */}
+  </>
+)
+```
+
+#### preload/page.tsx + loading.tsx
+- **Preload 优化**：条件渲染场景，数据获取与条件检查并行
+- **模式切换**：URL 参数 `?mode=preload` vs `?mode=serial` 对比耗时
+- **loading.tsx**：因为用了 `searchParams`（运行时数据），需要 Suspense 边界
+
+```tsx
+preload(id)  // 立即启动（不等待）
+const isAvailable = await checkAvailability(id)  // 同时检查
+if (isAvailable) {
+  const product = await getProduct(id)  // 数据可能已 ready
+}
+
+// preload 函数
+const preload = (id) => {
+  void getProduct(id)  // void = 执行但不等待
+}
+```
+
+---
+
+## 踩坑记录
+
+### 1. `new Date()` 必须在动态数据源之后
+
+```tsx
+// ❌ 错误：new Date() 在 fetch 之前
+const time = new Date()
+await fetch(url)
+
+// ✅ 正确：先 connection() 或 fetch(no-store)，再 new Date()
+await connection()
+const time = new Date()
+```
+
+**原因**：Next.js 预渲染需要知道"动态边界"，`new Date()` 是非确定性操作
+
+### 2. 运行时数据必须在 Suspense 内
+
+`searchParams`、`cookies()`、`headers()` 等运行时数据，必须：
+- 用 `<Suspense>` 包裹，或
+- 放在有 `loading.tsx` 的路由段内
+
+```
+Error: Uncached data was accessed outside of <Suspense>
+```
+
+### 3. `force-cache` 不算动态边界
+
+```tsx
+// force-cache 的 fetch 是缓存的，不触发动态边界
+await fetch(url, { cache: 'force-cache' })
+const time = new Date()  // ❌ 仍然会报错
+
+// 需要显式标记
+await connection()  // ✅ 告诉 Next.js 这是动态内容
+const time = new Date()
+```
