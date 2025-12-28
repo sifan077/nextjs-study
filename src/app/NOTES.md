@@ -1338,3 +1338,140 @@ export async function createPost(formData: FormData): Promise<void> {
 ```
 
 **原因**：form action 的类型签名是 `(formData: FormData) => void | Promise<void>`
+
+---
+
+## Caching and Revalidating（缓存与重验证）
+
+### 1. 核心概念
+
+| 概念 | 说明 |
+|------|------|
+| **Caching** | 存储数据获取结果，后续请求直接返回缓存 |
+| **Revalidating** | 更新缓存条目，无需重建整个应用 |
+
+### 2. Next.js 16 缓存 API
+
+| API | 用途 |
+|-----|------|
+| `fetch + cache/revalidate` | 缓存 HTTP 请求 |
+| `'use cache'` | 缓存任意函数/组件（数据库、计算等） |
+| `cacheTag()` | 为缓存打标签 |
+| `revalidateTag()` | 按标签清除缓存 |
+| `revalidatePath()` | 按路径清除缓存 |
+
+### 3. fetch 缓存控制
+
+```tsx
+// 默认：不缓存（但可能预渲染 HTML）
+const data = await fetch('https://...')
+
+// 强制缓存
+const data = await fetch('https://...', { cache: 'force-cache' })
+
+// 不缓存
+const data = await fetch('https://...', { cache: 'no-store' })
+
+// 定时重验证（60秒后）
+const data = await fetch('https://...', { next: { revalidate: 60 } })
+
+// 打标签（支持按需刷新）
+const data = await fetch('https://...', {
+  cache: 'force-cache',
+  next: { tags: ['posts'] }
+})
+```
+
+### 4. use cache + cacheTag
+
+适用于**任意服务端操作**（数据库、文件、计算），不仅限于 fetch：
+
+```tsx
+import { cacheTag } from 'next/cache'
+
+async function getProducts() {
+  'use cache'              // 启用缓存
+  cacheTag('products')     // 打标签
+
+  const products = await db.query('SELECT * FROM products')
+  return products
+}
+```
+
+**自动缓存键**：函数参数自动成为缓存键
+
+```tsx
+async function getProductById(id: string) {
+  'use cache'
+  cacheTag(`product-${id}`)
+  return db.query('SELECT * FROM products WHERE id = ?', [id])
+}
+
+// getProductById('1') 和 getProductById('2') 分别缓存
+```
+
+### 5. revalidateTag vs revalidatePath
+
+| 方法 | 粒度 | 适用场景 |
+|------|------|----------|
+| `revalidateTag('posts')` | 按标签 | 清除所有相关数据（跨多个页面） |
+| `revalidatePath('/posts')` | 按路径 | 清除特定页面 |
+
+```tsx
+// 场景：更新商品信息，商品可能在多个页面显示
+
+// 方式1：按路径（需要知道所有页面）
+revalidatePath('/products')
+revalidatePath('/products/123')
+revalidatePath('/')
+
+// 方式2：按标签（更简洁）
+revalidateTag('products')  // 一次清除所有
+```
+
+### 6. fetch vs use cache 对比
+
+| 特性 | fetch 缓存 | use cache |
+|------|-----------|-----------|
+| 适用范围 | HTTP 请求 | 任意操作（数据库、计算、文件） |
+| 打标签 | `next: { tags: [] }` | `cacheTag()` |
+| 缓存键 | URL | 函数参数自动成为键 |
+| 定时重验证 | `next: { revalidate: N }` | `cacheLife()` |
+
+### 7. 对比 Java Spring
+
+| Next.js | Java Spring |
+|---------|-------------|
+| `'use cache'` | `@Cacheable` |
+| `cacheTag('name')` | `@Cacheable(cacheNames = "name")` |
+| `revalidateTag('name')` | `@CacheEvict(cacheNames = "name")` |
+| `revalidatePath('/path')` | 手动清除特定缓存键 |
+
+---
+
+## 代码改动说明
+
+### 8. Caching and Revalidating 示例
+文件夹：`src/app/caching/`
+
+```
+src/app/caching/
+├── layout.tsx        → 统一布局（导航栏）
+├── actions.ts        → revalidateTag/revalidatePath 操作
+├── page.tsx          → /caching 首页（概念介绍）
+├── fetch/
+│   └── page.tsx      → fetch 缓存控制示例
+└── use-cache/
+    └── page.tsx      → use cache + cacheTag 示例
+```
+
+#### fetch/page.tsx
+- **force-cache**：强制缓存，刷新时间戳不变
+- **no-store**：不缓存，每次时间戳都变
+- **revalidate: 60**：60秒后重验证
+- **tags: ['posts']**：打标签，支持 revalidateTag 清除
+
+#### use-cache/page.tsx
+- **getProducts()**：`'use cache'` + `cacheTag('products')`
+- **getStats()**：同一个 tag，revalidateTag 会一起清除
+- **按钮操作**：revalidateTag / revalidatePath 对比
